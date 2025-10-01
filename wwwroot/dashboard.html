@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Sistema Epidemiológico — RIS</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <style>
+    .right-tabs{display:flex;gap:8px;margin-bottom:10px}
+    .right-tabs .rtab{border:1px solid #cbd5e1;background:#f8fafc;padding:6px 10px;border-radius:8px;cursor:pointer;font-weight:600}
+    .right-tabs .rtab.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
+    .obs-cell input.obs-input{width:100%;min-width:140px;border:1px solid #cbd5e1;padding:2px 6px;border-radius:6px;font-size:12px}
+	/* Modo captura: mostrar texto y ocultar el input */
+	.obs-cell .obs-display{display:none; white-space:normal; line-height:1.2}
+	body.capturando .obs-input{display:none}
+	body.capturando .obs-display{display:inline-block}
+  </style>
+</head>
+<body>
+<header>Sistema Epidemiológico — RIS</header>
+<div class="wrap grid">
+
+  <!-- Panel izquierdo -->
+  <section class="card">
+    <h3>1) Subir archivos CSV</h3>
+    <p class="note">Acepta: <b>iras.csv</b>, <b>edas.csv</b>, <b>febriles.csv</b>, <b>individual.csv</b> (opcional) y <b>eess_maestro.csv</b> para nombres/RIS.</p>
+
+    <label>iras.csv</label><input type="file" id="file-iras" accept=".csv"/>
+    <label>edas.csv</label><input type="file" id="file-edas" accept=".csv"/>
+    <label>febriles.csv</label><input type="file" id="file-febriles" accept=".csv"/>
+    <label>individual.csv</label><input type="file" id="file-individual" accept=".csv"/>
+    <label>eess_maestro.csv</label><input type="file" id="file-maestro" accept=".csv"/>
+
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px;">
+      <div><label>Año</label><input id="ano" type="number" value="2025" min="2020" max="2030"></div>
+      <div><label>Semana</label><input id="semana" type="number" value="38" min="1" max="53"></div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <label>RIS</label><select id="ris"><option value="">(Todas)</option></select>
+    </div>
+
+    <div style="margin-top:12px;">
+      <label>Buscar establecimiento</label>
+      <input id="q-est" type="text" placeholder="Escribe parte del nombre o RENAES">
+    </div>
+
+    <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label><input type="checkbox" id="chk-compact" checked> Modo compacto</label>
+      <label><input type="checkbox" id="chk-group-ris" checked> Agrupar por RIS</label>
+      <label><input type="checkbox" id="chk-hide-zeros"> Ocultar filas en 0</label>
+      <label><input type="checkbox" id="includeAll" checked> Mostrar todos (incl. no notificados)</label>
+      <label><input type="checkbox" id="chk-excluir-mental" checked> Excluir Centros de Salud Mental (CSMC)</label>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button id="btn-subir-consolidar">Subir y consolidar</button>
+      <button id="btn-capturar">Capturar JPG</button>
+    </div>
+
+    <hr>
+    <div id="archivos-guardados" class="note"></div>
+    <p id="msg" class="note"></p>
+
+    <div style="margin-top:10px;"><span class="kpi ok">Est. notificados: <span id="kpi-notificados">0</span></span></div>
+    <div style="margin-top:6px;"><span class="kpi bad">No notificados: <span id="kpi-nonotificados">0</span></span></div>
+  </section>
+
+  <!-- Panel derecho -->
+  <section class="card">
+    <div class="right-tabs">
+      <button class="rtab active" data-view="consolidado">Consolidado</button>
+      <button class="rtab" data-view="pivot">Series semanales</button>
+    </div>
+
+    <!-- CONSOLIDADO -->
+    <div id="card-consolidado">
+      <h2 id="titulo-reporte">2) Consolidado por Establecimiento — SE ?</h2>
+
+      <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px;">
+        <button id="btn-notificante">Generar Tabla Notificante</button>
+        <a id="lnk-csv" href="/api/reporte/notificacion-semanal.csv" target="_blank" style="display:none">Descargar CSV</a>
+        <span id="msg-notificante" class="note"></span>
+      </div>
+
+      <div id="tabla-wrap">
+        <table id="tabla-resumen">
+          <colgroup id="colgroup"></colgroup>
+          <thead>
+            <tr>
+              <th class="col-ris">RIS</th>
+              <th>ESTABLECIMIENTO</th>
+              <th>IRA</th>
+              <th>NEUMONIAS</th>
+              <th>SOB.ASMA</th>
+              <th>EDA ACUOSA</th>
+              <th>DISENTERICA</th>
+              <th>FEB</th>
+              <th>OBSERVACIONES</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="2">TOTALES</td>
+              <td id="t-ira">0</td>
+              <td id="t-neu">0</td>
+              <td id="t-sob">0</td>
+              <td id="t-daa">0</td>
+              <td id="t-dis">0</td>
+              <td id="t-feb">0</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+
+    <!-- PIVOT -->
+    <div id="card-pivot" style="display:none">
+      <h3>Series semanales</h3>
+      <div class="pivot-controls">
+        <div class="tabs" id="tabs-vigilancia">
+          <button data-ind="EDA" class="active">EDA</button>
+          <button data-ind="IRA">IRA</button>
+          <button data-ind="NEU">NEU</button>
+          <button data-ind="SOBASMA">SOB/ASMA</button>
+          <button data-ind="FEB">FEB</button>
+        </div>
+        <div class="pivot-filters">
+          <label>Ver por</label>
+          <select id="pv-group">
+            <option value="estab">Establecimiento</option>
+            <option value="ris">RIS</option>
+          </select>
+          <label>Semanas</label>
+          <input id="pv-desde" type="number" min="1" max="53" value="1" style="width:68px">
+          <span>—</span>
+          <input id="pv-hasta" type="number" min="1" max="53" value="38" style="width:68px">
+          <button id="pv-actualizar">Actualizar</button>
+        </div>
+      </div>
+      <div id="pivot-wrap"><table id="pivot-table"></table></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const api = {
+  upload: '/api/upload',
+  files:  '/api/files',
+  risOptions: '/api/epi/ris-options',
+  summary: (a,s,ris,all) => {
+    const p = new URLSearchParams({ ano:a, semana:s, includeAll:String(all) });
+    if (ris) p.append('ris', ris);
+    return `/api/epi/summary?${p.toString()}`;
+  }
+};
+let lastSummary = null;
+
+/* ---------- utilidades ---------- */
+function sumRow(f){return (f.ira|0)+(f.neumonias|0)+(f.sob_asma|0)+(f.eda_acuosa|0)+(f.disenterica|0)+(f.feb|0)}
+function sumArray(arr,key){return arr.reduce((s,x)=>s+(x[key]|0),0)}
+function groupBy(arr, keyFn){const m=new Map();for(const x of arr){const k=keyFn(x)??'';if(!m.has(k))m.set(k,[]);m.get(k).push(x)}return m}
+async function uploadCsv(el, forcedName){if(!el||!el.files||el.files.length===0)return;const fd=new FormData();fd.append('file',el.files[0],forcedName);const r=await fetch(api.upload,{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text())}
+async function refrescarArchivos(){const r=await fetch(api.files);if(!r.ok)return;const list=await r.json();const el=document.getElementById('archivos-guardados');if(el)el.textContent=`Archivos guardados: ${list.length} — ${list.map(x=>x.name).join(', ')}`;}
+async function cargarOpcionesRIS(){try{const r=await fetch(api.risOptions);if(!r.ok)return;const {options}=await r.json();const sel=document.getElementById('ris');sel.innerHTML=`<option value="">(Todas)</option>`+options.map(o=>`<option>${o}</option>`).join('');const pvSel=document.getElementById('pv-group');options.forEach(o=>{const opt=document.createElement('option');opt.value=`ris:${o}`;opt.textContent=o;pvSel.appendChild(opt)})}catch(e){console.warn(e)}}
+
+/* ---------- filtro Salud Mental (CSMC) ---------- */
+function esSaludMental(f){
+  const raw=(f.establecimiento||'');
+  const nombre=raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  const colapsado=nombre.replace(/[^A-Z]/g,''); // C.S.M.C. -> CSMC
+  if(colapsado.includes('CSMC')) return true;
+  return /\bSALUD\s*MENTAL\b/.test(nombre)
+      || /\bMENTAL\s*COMUNITARIO\b/.test(nombre)
+      || /\bCOMUNITARIO\s*DE\s*SALUD\s*MENTAL\b/.test(nombre);
+}
+function getExclMental(){const v=localStorage.getItem('excluir_csmc');return v===null?true:v==='1'}
+function setExclMental(on){localStorage.setItem('excluir_csmc',on?'1':'0');const el=document.getElementById('chk-excluir-mental');if(el)el.checked=!!on}
+
+/* ---------- Observaciones (localStorage) ---------- */
+function obsKey(y,w,f){const id=(f.renaes&&f.renaes.trim())?f.renaes.trim():(f.establecimiento||'').trim();return `obs:${y}:${w}:${id}`}
+function getObs(y,w,f){return localStorage.getItem(obsKey(y,w,f))||''}
+function setObs(y,w,f,txt){localStorage.setItem(obsKey(y,w,f),txt||'')}
+
+/* ---------- tabla consolidado ---------- */
+function buildColgroup(){
+  const grouped=document.getElementById('chk-group-ris')?.checked;
+  const cg=document.getElementById('colgroup'); if(!cg) return;
+  if(grouped){
+    cg.innerHTML=`<col style="width:50%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:8%">`;
+  }else{
+    cg.innerHTML=`<col style="width:16%"><col style="width:34%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:8%">`;
+  }
+}
+function fitTableToPanel(){
+  const wrap=document.getElementById('tabla-wrap'), table=document.getElementById('tabla-resumen'); if(!wrap||!table) return;
+  table.style.transform='scale(1)'; wrap.style.overflowX='hidden';
+  requestAnimationFrame(()=>{const available=wrap.clientWidth-6; const need=table.scrollWidth; if(need<=0)return; const scale=available/need; if(scale<0.85){table.style.transform='scale(1)';wrap.style.overflowX='auto'} else {table.style.transform=`scale(${Math.min(1,scale)})`}})
+}
+function autoSizeColumns(){
+  const table=document.getElementById('tabla-resumen'), cg=document.getElementById('colgroup'); if(!table||!cg) return;
+  table.style.tableLayout='auto'; table.style.width='auto';
+  table.querySelectorAll('th,td').forEach(c=>{c.style.whiteSpace='nowrap';c.style.overflow='visible';c.style.textOverflow='clip'});
+  const thead=table.tHead, tbody=table.tBodies[0]; if(!thead||!tbody) return;
+  const ths=Array.from(thead.rows[0].cells); const nCols=ths.length; const rows=Array.from(tbody.rows).slice(0,60); const maxW=new Array(nCols).fill(0);
+  ths.forEach((th,j)=>{maxW[j]=Math.max(maxW[j],th.scrollWidth)}); rows.forEach(tr=>{Array.from(tr.cells).forEach((td,j)=>{maxW[j]=Math.max(maxW[j],td.scrollWidth)})});
+  const isGrouped=document.getElementById('chk-group-ris')?.checked; const minNumPx=48,minEstPx=280,minRisPx=140;
+  const weights=maxW.map((w,j)=>{ if(!isGrouped&&j===0) return Math.max(w,minRisPx); if((!isGrouped&&j===1)||(isGrouped&&j===0)) return Math.max(w,minEstPx); return Math.max(w,minNumPx) });
+  const total=weights.reduce((a,b)=>a+b,0)||1;
+  cg.innerHTML=weights.map(w=>`<col style="width:${(w/total*100).toFixed(4)}%">`).join('');
+  table.style.tableLayout='fixed'; table.style.width='max-content';
+  fitTableToPanel();
+}
+function toggleGroupedClass(){ const wrap=document.getElementById('tabla-wrap'); const grouped=document.getElementById('chk-group-ris')?.checked; wrap.classList.toggle('grouped',!!grouped) }
+
+function renderTabla(data){
+  lastSummary=data;
+  const wrap=document.getElementById('tabla-wrap');
+  const compact=document.getElementById('chk-compact')?.checked;
+  const groupRis=document.getElementById('chk-group-ris')?.checked;
+  const hideZeros=document.getElementById('chk-hide-zeros')?.checked;
+  wrap.classList.toggle('compact',!!compact);
+
+  const y=parseInt(document.getElementById('ano').value,10);
+  const w=parseInt(document.getElementById('semana').value,10);
+
+  const q=(document.getElementById('q-est').value||'').trim().toLowerCase();
+  let filas=(data.filas||[]).slice();
+
+  if(getExclMental()) filas=filas.filter(f=>!esSaludMental(f));
+  if(q){ filas=filas.filter(f=>(f.establecimiento||'').toLowerCase().includes(q)||(f.renaes||'').toLowerCase().includes(q)) }
+  if(hideZeros) filas=filas.filter(f=>sumRow(f)>0);
+
+  const tb=document.querySelector('#tabla-resumen tbody');
+
+  if(!groupRis){
+    tb.innerHTML=filas.map(f=>`
+      <tr>
+        <td class="col-ris" title="${f.ris??''}">${f.ris??''}</td>
+        <td title="${f.establecimiento}">${f.establecimiento}</td>
+        <td>${f.ira}</td><td>${f.neumonias}</td><td>${f.sob_asma}</td><td>${f.eda_acuosa}</td><td>${f.disenterica}</td><td>${f.feb}</td>
+        <td class="obs-cell">
+		<input class="obs-input" type="text"
+         value="${(getObs(y,w,f)).replace(/"/g,'&quot;')}"
+         data-renaes="${f.renaes||''}"
+         data-est="${(f.establecimiento||'').replace(/"/g,'&quot;')}">
+		<span class="obs-display">${(getObs(y,w,f))}</span>
+		</td>
+      </tr>`).join('');
+  }else{
+    const g=groupBy(filas,f=>(f.ris||'').trim()); const blocks=[];
+    for(const [ris,arr] of g.entries()){
+      const gi={ira:sumArray(arr,'ira'),neu:sumArray(arr,'neumonias'),sob:sumArray(arr,'sob_asma'),daa:sumArray(arr,'eda_acuosa'),dis:sumArray(arr,'disenterica'),feb:sumArray(arr,'feb')};
+      blocks.push(`<tr class="group-row"><td colspan="2">${ris||'(Sin RIS)'} — ${arr.length} EESS</td><td>${gi.ira}</td><td>${gi.neu}</td><td>${gi.sob}</td><td>${gi.daa}</td><td>${gi.dis}</td><td>${gi.feb}</td><td></td></tr>`);
+      for(const f of arr){
+        blocks.push(`<tr>
+          <td></td><td>${f.establecimiento}</td>
+          <td>${f.ira}</td><td>${f.neumonias}</td><td>${f.sob_asma}</td><td>${f.eda_acuosa}</td><td>${f.disenterica}</td><td>${f.feb}</td>
+          <td class="obs-cell"><input class="obs-input" type="text" value="${(getObs(y,w,f)).replace(/"/g,'&quot;')}" data-renaes="${f.renaes||''}" data-est="${(f.establecimiento||'').replace(/"/g,'&quot;')}"></td>
+        </tr>`);
+      }
+    }
+    tb.innerHTML=blocks.join('');
+  }
+
+  const tVis={ira:sumArray(filas,'ira'),neumonias:sumArray(filas,'neumonias'),sob_asma:sumArray(filas,'sob_asma'),eda_acuosa:sumArray(filas,'eda_acuosa'),disenterica:sumArray(filas,'disenterica'),feb:sumArray(filas,'feb')};
+  document.getElementById('t-ira').textContent=tVis.ira;
+  document.getElementById('t-neu').textContent=tVis.neumonias;
+  document.getElementById('t-sob').textContent=tVis.sob_asma;
+  document.getElementById('t-daa').textContent=tVis.eda_acuosa;
+  document.getElementById('t-dis').textContent=tVis.disenterica;
+  document.getElementById('t-feb').textContent=tVis.feb;
+
+  document.getElementById('kpi-notificados').textContent=data.conteo_estab_notificados??0;
+  document.getElementById('kpi-nonotificados').textContent=data.conteo_estab_no_notificados??0;
+
+  const msg=document.getElementById('msg'); if(msg) msg.textContent='OK';
+  requestAnimationFrame(()=>{buildColgroup();autoSizeColumns()});
+}
+
+/* guarda Observaciones por delegación */
+document.getElementById('tabla-wrap')?.addEventListener('input',(ev)=>{
+  const inp = ev.target.closest('input.obs-input'); if(!inp) return;
+  const y = parseInt(document.getElementById('ano').value,10);
+  const w = parseInt(document.getElementById('semana').value,10);
+  const f = { renaes: inp.dataset.renaes, establecimiento: inp.dataset.est };
+  setObs(y, w, f, inp.value);
+  // refleja en el span visible durante la captura
+  const span = inp.parentElement.querySelector('.obs-display');
+  if (span) span.textContent = inp.value;
+});
+
+/* ---------- Semana epidemiológica (PAHO: semana con 4 de enero) ---------- */
+function startOfSE1(year){const jan4=new Date(year,0,4);const dow=jan4.getDay();const sunday=new Date(jan4);sunday.setDate(jan4.getDate()-dow);return sunday}
+function rangoSE(year,se){const start=startOfSE1(year);start.setDate(start.getDate()+(se-1)*7);const end=new Date(start);end.setDate(start.getDate()+6);return {ini:start,fin:end}}
+const dfmt=d=>d.toLocaleDateString('es-PE',{day:'2-digit',month:'short'});
+function actualizarEncabezadoSE(){const y=parseInt(document.getElementById('ano')?.value,10);const w=parseInt(document.getElementById('semana')?.value,10);const h2=document.getElementById('titulo-reporte');if(!y||!w||!h2)return;const {ini,fin}=rangoSE(y,w);h2.textContent=`2) Consolidado por Establecimiento — SEMANA EPIDEMIOLÓGICA ${w} (${dfmt(ini)}–${dfmt(fin)} ${y})`}
+
+/* ---------- acciones principales ---------- */
+async function subirYConsolidar(){
+  try{
+    const ano=parseInt(document.getElementById('ano').value,10);
+    const semana=parseInt(document.getElementById('semana').value,10);
+    const ris=document.getElementById('ris').value.trim();
+    const includeAll=document.getElementById('includeAll').checked;
+
+    await uploadCsv(document.getElementById('file-iras'),'iras.csv');
+    await uploadCsv(document.getElementById('file-edas'),'edas.csv');
+    await uploadCsv(document.getElementById('file-febriles'),'febriles.csv');
+    await uploadCsv(document.getElementById('file-individual'),'individual.csv');
+    await uploadCsv(document.getElementById('file-maestro'),'eess_maestro.csv');
+
+    await refrescarArchivos();
+
+    const url=api.summary(ano, semana, ris||undefined, includeAll);
+    const r=await fetch(url); if(!r.ok) throw new Error(await r.text());
+    const data=await r.json();
+    renderTabla(data);
+    actualizarEncabezadoSE();
+  }catch(err){console.error(err);alert('Error: '+err.message)}
+}
+
+async function capturarJPG(){
+  actualizarEncabezadoSE();
+
+  // 1) activar modo captura (muestra spans y oculta inputs)
+  document.body.classList.add('capturando');
+  // sincroniza spans por si quedaron desfasados
+  document.querySelectorAll('input.obs-input').forEach(inp=>{
+    const span = inp.parentElement.querySelector('.obs-display');
+    if (span) span.textContent = inp.value;
+    // truco adicional: html2canvas a veces usa el atributo
+    inp.setAttribute('value', inp.value);
+  });
+
+  const visCard = document.getElementById('card-pivot').style.display==='block'
+    ? document.getElementById('card-pivot')
+    : document.getElementById('card-consolidado');
+
+  const wrapTabla=document.getElementById('tabla-wrap');
+  const prevCompact=wrapTabla?.classList.contains('compact');
+  if(wrapTabla) wrapTabla.classList.add('compact');
+
+  const ano=document.getElementById('ano').value;
+  const semana=document.getElementById('semana').value;
+  const ris=document.getElementById('ris').value||'todas';
+
+  const canvas=await html2canvas(visCard,{scale:2, backgroundColor:'#ffffff'});
+  const dataURL=canvas.toDataURL('image/jpeg',0.92);
+  const a=document.createElement('a');
+  a.href=dataURL;
+  a.download=`tablero_${visCard.id==='card-pivot'?'pivot':'consolidado'}_SE${semana}_A${ano}_${ris.replace(/\s+/g,'_')}.jpg`;
+  a.click();
+
+  if(wrapTabla && !prevCompact) wrapTabla.classList.remove('compact');
+
+  // 2) salir de modo captura
+  document.body.classList.remove('capturando');
+}
+
+
+async function generarTablaNotificante(){
+  try{
+    if(!lastSummary||!lastSummary.filas){alert('Primero genera el consolidado.');return}
+    actualizarEncabezadoSE();
+    const ano=parseInt(document.getElementById('ano').value,10);
+    const semana=parseInt(document.getElementById('semana').value,10);
+    const ris=document.getElementById('ris').value.trim();
+
+    const payload={
+      anio:ano, semana, ubigeo:"", ris:ris||null,
+      filas:lastSummary.filas.map(f=>({renaes:f.renaes, ira:f.ira, neumonias:f.neumonias, sob_asma:f.sob_asma, eda_acuosa:f.eda_acuosa, disenterica:f.disenterica, feb:f.feb}))
+    };
+
+    const r=await fetch('/api/reporte/notificacion-semanal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok) throw new Error(await r.text());
+    document.getElementById('lnk-csv').style.display='inline-block';
+    document.getElementById('msg-notificante').textContent='Reporte generado.';
+  }catch(e){console.error(e);document.getElementById('msg-notificante').textContent='Error generando reporte';alert('Error generando reporte: '+e.message)}
+}
+
+/* ---------- PIVOT ---------- */
+const apiPivot=(ano,ind,groupBy,s1,s2,ris)=>{const p=new URLSearchParams({ano,indicator:ind,groupBy,semana_ini:s1,semana_fin:s2});if(ris)p.append('ris',ris);return `/api/epi/pivot?${p.toString()}`;}
+function drawSparkline(canvas,values){if(!canvas)return;const w=canvas.width=canvas.clientWidth,h=canvas.height=canvas.clientHeight;const ctx=canvas.getContext('2d');ctx.clearRect(0,0,w,h);if(!values||values.length===0)return;const max=Math.max(1,...values),step=w/Math.max(1,values.length-1);ctx.lineWidth=1;ctx.strokeStyle='#1e88e5';ctx.beginPath();values.forEach((v,i)=>{const x=Math.round(i*step),y=Math.round(h-(v/max)*h);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});ctx.stroke();const lastX=Math.round((values.length-1)*step),lastY=Math.round(h-(values.at(-1)/max)*h);ctx.fillStyle='#1e88e5';ctx.beginPath();ctx.arc(lastX,lastY,2,0,Math.PI*2);ctx.fill()}
+async function cargarPivot(){
+  const ano=parseInt(document.getElementById('ano').value,10);
+  const s1=parseInt(document.getElementById('pv-desde').value,10);
+  const s2=parseInt(document.getElementById('pv-hasta').value,10);
+  const groupSel=document.getElementById('pv-group').value;
+  let group='estab'; let risFilter=(document.getElementById('ris')?.value||'').trim();
+  if(groupSel==='ris'){group='ris';risFilter=''} else if(groupSel.startsWith('ris:')){group='estab';risFilter=groupSel.substring(4)}
+  const ind=document.querySelector('#tabs-vigilancia button.active')?.dataset.ind || 'EDA';
+  const url=apiPivot(ano,ind,group,s1,s2,risFilter||undefined); const r=await fetch(url); if(!r.ok){console.error(await r.text());return} const data=await r.json(); renderPivot(data);
+}
+function renderPivot(data){
+  let semanas=data.semanas; let rows=data.rows??[]; let total=data.totalFila;
+  if(getExclMental() && data.groupBy==='estab'){
+    rows=rows.filter(r=>!esSaludMental({establecimiento:r.label}));
+    const colSums=new Array(semanas.length).fill(0);
+    rows.forEach(r=>r.values.forEach((v,i)=>colSums[i]+= (v|0)));
+    total={label:'TOTALES',values:colSums,total:colSums.reduce((a,b)=>a+b,0)};
+  }
+  const t=document.getElementById('pivot-table');
+  let thead=`<thead><tr><th class="pv-sticky">${data.groupBy==='estab'?'ESTABLECIMIENTO':'RIS'}</th>${semanas.map(s=>`<th>SE ${s}</th>`).join('')}<th>TOTAL</th><th>TENDENCIA</th></tr></thead>`;
+  let tbody='<tbody>';
+  for(const r of rows){
+    tbody+=`<tr><td class="pv-sticky">${r.label}</td>${r.values.map(v=>`<td style="text-align:right">${v}</td>`).join('')}<td style="text-align:right;font-weight:600">${r.total}</td><td><canvas class="spark" data-serie="${r.values.join(',')}"></canvas></td></tr>`;
+  }
+  tbody+='</tbody>';
+  let tfoot=`<tfoot><tr><td class="pv-sticky">${total.label}</td>${total.values.map(v=>`<td style="text-align:right">${v}</td>`).join('')}<td style="text-align:right">${total.total}</td><td></td></tr></tfoot>`;
+  t.innerHTML=thead+tbody+tfoot;
+  t.querySelectorAll('canvas.spark').forEach(cv=>{const serie=(cv.dataset.serie||'').split(',').map(x=>parseInt(x,10)||0);drawSparkline(cv,serie)});
+}
+
+/* ---------- listeners ---------- */
+document.getElementById('tabs-vigilancia')?.addEventListener('click',(ev)=>{const btn=ev.target.closest('button[data-ind]');if(!btn)return;document.querySelectorAll('#tabs-vigilancia button').forEach(b=>b.classList.remove('active'));btn.classList.add('active');cargarPivot()});
+document.getElementById('pv-actualizar')?.addEventListener('click',cargarPivot);
+document.getElementById('ris')?.addEventListener('change',()=>{if(document.getElementById('card-pivot').style.display==='block')cargarPivot()});
+window.addEventListener('resize',()=>{document.querySelectorAll('canvas.spark').forEach(cv=>{const serie=(cv.dataset.serie||'').split(',').map(x=>parseInt(x,10)||0);drawSparkline(cv,serie)})});
+
+const views={consolidado:document.getElementById('card-consolidado'),pivot:document.getElementById('card-pivot')};
+document.querySelector('.right-tabs')?.addEventListener('click',(ev)=>{const btn=ev.target.closest('.rtab');if(!btn)return;document.querySelectorAll('.right-tabs .rtab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');const v=btn.dataset.view;Object.entries(views).forEach(([k,el])=>el.style.display=(k===v?'block':'none'));if(v==='pivot')cargarPivot()});
+
+document.getElementById('btn-subir-consolidar').addEventListener('click',subirYConsolidar);
+document.getElementById('btn-capturar').addEventListener('click',capturarJPG);
+document.getElementById('btn-notificante').addEventListener('click',generarTablaNotificante);
+
+['chk-compact','chk-group-ris','chk-hide-zeros'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('change',()=>{toggleGroupedClass(); if(lastSummary) renderTabla(lastSummary); requestAnimationFrame(()=>autoSizeColumns())});
+});
+document.getElementById('q-est').addEventListener('input',()=>{if(lastSummary)renderTabla(lastSummary)});
+
+// Switch CSMC persistente
+setExclMental(getExclMental());
+document.getElementById('chk-excluir-mental')?.addEventListener('change',(e)=>{
+  setExclMental(e.target.checked);
+  if(lastSummary) renderTabla(lastSummary);
+  if(document.getElementById('card-pivot').style.display==='block') cargarPivot();
+});
+
+/* Inicial */
+buildColgroup();
+refrescarArchivos();
+cargarOpcionesRIS();
+actualizarEncabezadoSE();
+</script>
+</body>
+</html>
