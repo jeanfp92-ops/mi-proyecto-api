@@ -186,20 +186,42 @@ async function maestroExisteEnServidor(){
 }
 
 async function subirMaestroDesdeURL(){
-  var resp = await fetch(MAESTRO_URL, { cache: 'no-store' });
-  if(!resp.ok) throw new Error('No se pudo descargar eess_maestro.csv desde '+MAESTRO_URL);
-  var text = await resp.text();
-  var blob = new Blob([text], { type: 'text/csv' });
-  var fd = new FormData();
-  fd.append('file', blob, 'eess_maestro.csv');
-  var up = await fetch(api.upload, { method:'POST', body: fd });
-  if(!up.ok) throw new Error('Fallo al subir eess_maestro.csv: '+await up.text());
+   try{
+    const url = MAESTRO_URL + '?v=' + Date.now(); // evita copiar una respuesta cacheada 404
+    const resp = await fetch(url, { cache: 'no-store' });
+    if(!resp.ok){
+      console.warn('No se halló eess_maestro.csv en', MAESTRO_URL, 'status=', resp.status);
+      return false; // no rompas el flujo
+    }
+    const text = await resp.text();
+    const blob = new Blob([text], { type: 'text/csv' });
+    const fd = new FormData();
+    fd.append('file', blob, 'eess_maestro.csv');
+    const up = await fetch(api.upload, { method:'POST', body: fd });
+    if(!up.ok){
+      console.warn('No se pudo subir eess_maestro.csv:', await up.text());
+      return false;
+    }
+    return true;
+  }catch(e){
+    console.warn('subirMaestroDesdeURL error:', e);
+    return false;
+  }
 }
 
 async function asegurarMaestro(){
-  var ya = await maestroExisteEnServidor();
-  if(!ya){ await subirMaestroDesdeURL(); }
-  await refrescarArchivos();
+  try{
+    const ya = await maestroExisteEnServidor();
+    if(!ya){
+      const ok = await subirMaestroDesdeURL();
+      if(!ok){ await refrescarArchivos(); return false; }
+    }
+    await refrescarArchivos();
+    return true;
+  }catch(e){
+    console.warn('asegurarMaestro error:', e);
+    return false;
+  }
 }
 /* =================================================== */
 
@@ -684,7 +706,7 @@ window.addEventListener('DOMContentLoaded', function () {
   refrescarArchivos();
   cargarOpcionesRIS();
   actualizarEncabezadoSE();
-  asegurarMaestro(); // maestro auto
+  asegurarMaestro().catch(function(e){ console.warn('asegurarMaestro()', e); });
 });
 </script>
 </body>
