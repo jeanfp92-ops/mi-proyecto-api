@@ -7,6 +7,9 @@
     <RootNamespace>SuperMegaSistemaEpi</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+ <Content Include="wwwroot\**\*">
+    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+  </Content>
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 </Project>
