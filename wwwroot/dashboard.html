@@ -482,26 +482,26 @@ function actualizarEncabezadoSE(){
 
 /* ---------- acciones principales ---------- */
 async function subirYConsolidar(){
-  try{
-    var ano=parseInt(document.getElementById('ano').value,10);
-    var semana=parseInt(document.getElementById('semana').value,10);
-    var ris=document.getElementById('ris').value.trim();
-    var includeAll=document.getElementById('includeAll').checked;
+ try{
+    const ano = parseInt(document.getElementById('ano').value,10);
+    const semana = parseInt(document.getElementById('semana').value,10);
+    const ris = document.getElementById('ris').value.trim();
+    const includeAll = document.getElementById('includeAll').checked;
 
     await uploadCsv(document.getElementById('file-iras'),'iras.csv');
     await uploadCsv(document.getElementById('file-edas'),'edas.csv');
     await uploadCsv(document.getElementById('file-febriles'),'febriles.csv');
-    // Maestro: ahora se asegura automáticamente desde URL
-    await asegurarMaestro();
 
+    await asegurarMaestro();     // <-- asegura maestro
     await refrescarArchivos();
+    await cargarOpcionesRIS();   // <-- recarga opciones del combo
 
-    var url=api.summary(ano, semana, ris||undefined, includeAll);
-    var r=await fetch(url); if(!r.ok) throw new Error(await r.text());
-    var data=await r.json();
+    const url = api.summary(ano, semana, ris || undefined, includeAll);
+    const r = await fetch(url); if(!r.ok) throw new Error(await r.text());
+    const data = await r.json();
     renderTabla(data);
     actualizarEncabezadoSE();
-  }catch(err){console.error(err);alert('Error: '+err.message)}
+  }catch(err){ console.error(err); alert('Error: '+err.message); }
 }
 
 async function capturarJPG(){
@@ -703,10 +703,10 @@ if (chkEx){
 /* Inicial — ahora asegurado al estar el DOM listo */
 window.addEventListener('DOMContentLoaded', function () {
   buildColgroup();
-  refrescarArchivos();
-  cargarOpcionesRIS();
+  await asegurarMaestro();      // <-- primero garantizamos eess_maestro.csv
+  await refrescarArchivos();
+  await cargarOpcionesRIS();    // <-- ahora sí cargamos las opciones
   actualizarEncabezadoSE();
-  asegurarMaestro().catch(function(e){ console.warn('asegurarMaestro()', e); });
 });
 </script>
 </body>
