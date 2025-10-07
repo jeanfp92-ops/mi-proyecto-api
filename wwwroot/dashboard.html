@@ -5,16 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Sistema Epidemiológico — RIS</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="/favicon.ico">
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <style>
     .right-tabs{display:flex;gap:8px;margin-bottom:10px}
     .right-tabs .rtab{border:1px solid #cbd5e1;background:#f8fafc;padding:6px 10px;border-radius:8px;cursor:pointer;font-weight:600}
     .right-tabs .rtab.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
     .obs-cell input.obs-input{width:100%;min-width:140px;border:1px solid #cbd5e1;padding:2px 6px;border-radius:6px;font-size:12px}
-	/* Modo captura: mostrar texto y ocultar el input */
-	.obs-cell .obs-display{display:none; white-space:normal; line-height:1.2}
-	body.capturando .obs-input{display:none}
-	body.capturando .obs-display{display:inline-block}
+    /* Modo captura: mostrar texto y ocultar el input */
+    .obs-cell .obs-display{display:none; white-space:normal; line-height:1.2}
+    body.capturando .obs-input{display:none}
+    body.capturando .obs-display{display:inline-block}
+    .hidden{display:none !important}
+    /* Refuerzo por si se sirve HTML antiguo en caché */
+    #file-individual, #file-maestro { display:none !important; }
+    label[for="file-individual"], label[for="file-maestro"] { display:none !important; }
   </style>
 </head>
 <body>
@@ -24,13 +29,21 @@
   <!-- Panel izquierdo -->
   <section class="card">
     <h3>1) Subir archivos CSV</h3>
-    <p class="note">Acepta: <b>iras.csv</b>, <b>edas.csv</b>, <b>febriles.csv</b>, <b>individual.csv</b> (opcional) y <b>eess_maestro.csv</b> para nombres/RIS.</p>
+    <p class="note">Acepta: <b>iras.csv</b>, <b>edas.csv</b>, <b>febriles.csv</b>.</p>
 
-    <label>iras.csv</label><input type="file" id="file-iras" accept=".csv"/>
-    <label>edas.csv</label><input type="file" id="file-edas" accept=".csv"/>
-    <label>febriles.csv</label><input type="file" id="file-febriles" accept=".csv"/>
-    <label>individual.csv</label><input type="file" id="file-individual" accept=".csv"/>
-    <label>eess_maestro.csv</label><input type="file" id="file-maestro" accept=".csv"/>
+    <label for="file-iras">iras.csv</label><input type="file" id="file-iras" accept=".csv"/>
+    <label for="file-edas">edas.csv</label><input type="file" id="file-edas" accept=".csv"/>
+    <label for="file-febriles">febriles.csv</label><input type="file" id="file-febriles" accept=".csv"/>
+
+    <!-- Ocultos porque ya no se usan manualmente -->
+    <div class="hidden">
+      <label for="file-individual">individual.csv</label>
+      <input type="file" id="file-individual" accept=".csv"/>
+    </div>
+    <div class="hidden">
+      <label for="file-maestro">eess_maestro.csv</label>
+      <input type="file" id="file-maestro" accept=".csv"/>
+    </div>
 
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px;">
       <div><label>Año</label><input id="ano" type="number" value="2025" min="2020" max="2030"></div>
@@ -147,6 +160,7 @@
 </div>
 
 <script>
+/* ================== API endpoints ================== */
 const api = {
   upload: '/api/upload',
   files:  '/api/files',
@@ -159,13 +173,80 @@ const api = {
 };
 let lastSummary = null;
 
+/* ========== AUTO-CARGA eess_maestro.csv (NUEVO) ========== */
+const MAESTRO_URL = '/static/data/eess_maestro.csv'; // ajusta tu ruta
+
+async function maestroExisteEnServidor(){
+  try{
+    const r = await fetch(api.files);
+    if(!r.ok) return false;
+    const list = await r.json();
+    return Array.isArray(list) && list.some(x => (x.name||'').toLowerCase() === 'eess_maestro.csv');
+  }catch(e){ return false; }
+}
+
+async function subirMaestroDesdeURL(){
+  const resp = await fetch(MAESTRO_URL, { cache: 'no-store' });
+  if(!resp.ok) throw new Error('No se pudo descargar eess_maestro.csv desde '+MAESTRO_URL);
+  const text = await resp.text();
+  const blob = new Blob([text], { type: 'text/csv' });
+  const fd = new FormData();
+  fd.append('file', blob, 'eess_maestro.csv');
+  const up = await fetch(api.upload, { method:'POST', body: fd });
+  if(!up.ok) throw new Error('Fallo al subir eess_maestro.csv: '+await up.text());
+}
+
+async function asegurarMaestro(){
+  const ya = await maestroExisteEnServidor();
+  if(!ya){ await subirMaestroDesdeURL(); }
+  await refrescarArchivos();
+}
+/* =================================================== */
+
 /* ---------- utilidades ---------- */
 function sumRow(f){return (f.ira|0)+(f.neumonias|0)+(f.sob_asma|0)+(f.eda_acuosa|0)+(f.disenterica|0)+(f.feb|0)}
 function sumArray(arr,key){return arr.reduce((s,x)=>s+(x[key]|0),0)}
 function groupBy(arr, keyFn){const m=new Map();for(const x of arr){const k=keyFn(x)??'';if(!m.has(k))m.set(k,[]);m.get(k).push(x)}return m}
 async function uploadCsv(el, forcedName){if(!el||!el.files||el.files.length===0)return;const fd=new FormData();fd.append('file',el.files[0],forcedName);const r=await fetch(api.upload,{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text())}
-async function refrescarArchivos(){const r=await fetch(api.files);if(!r.ok)return;const list=await r.json();const el=document.getElementById('archivos-guardados');if(el)el.textContent=`Archivos guardados: ${list.length} — ${list.map(x=>x.name).join(', ')}`;}
-async function cargarOpcionesRIS(){try{const r=await fetch(api.risOptions);if(!r.ok)return;const {options}=await r.json();const sel=document.getElementById('ris');sel.innerHTML=`<option value="">(Todas)</option>`+options.map(o=>`<option>${o}</option>`).join('');const pvSel=document.getElementById('pv-group');options.forEach(o=>{const opt=document.createElement('option');opt.value=`ris:${o}`;opt.textContent=o;pvSel.appendChild(opt)})}catch(e){console.warn(e)}}
+
+async function refrescarArchivos(){
+  const r = await fetch(api.files);
+  if (!r.ok) return;
+
+  let list = await r.json();
+  const ocultar = new Set(['individual.csv']);   // si alguien lo sube, no lo mostramos
+  list = list.filter(x => !ocultar.has((x.name||'').toLowerCase()));
+
+  const el = document.getElementById('archivos-guardados');
+  if (el) el.textContent = `Archivos guardados: ${list.length} — ${list.map(x=>x.name).join(', ')}`;
+}
+
+async function cargarOpcionesRIS(){
+  try{
+    const r = await fetch(api.risOptions);
+    if (!r.ok) return;
+
+    const json = await r.json();
+    const options = Array.isArray(json?.options) ? json.options : [];
+
+    const sel = document.getElementById('ris');
+    if (sel) {
+      sel.innerHTML = `<option value="">(Todas)</option>` + options.map(o => `<option>${o}</option>`).join('');
+    }
+
+    const pvSel = document.getElementById('pv-group');
+    if (pvSel && options.length) {
+      options.forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = `ris:${o}`;
+        opt.textContent = o;
+        pvSel.appendChild(opt);
+      });
+    }
+  }catch(e){
+    console.warn('cargarOpcionesRIS error:', e);
+  }
+}
 
 /* ---------- filtro Salud Mental (CSMC) ---------- */
 function esSaludMental(f){
@@ -188,11 +269,34 @@ function setObs(y,w,f,txt){localStorage.setItem(obsKey(y,w,f),txt||'')}
 /* ---------- tabla consolidado ---------- */
 function buildColgroup(){
   const grouped=document.getElementById('chk-group-ris')?.checked;
-  const cg=document.getElementById('colgroup'); if(!cg) return;
+  const cg=document.getElementById('colgroup'); 
+  if(!cg) return;
+
   if(grouped){
-    cg.innerHTML=`<col style="width:50%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:8%">`;
+    /* 9 columnas: RIS, EST, 6 métricas, OBS */
+    cg.innerHTML = `
+      <col style="width:50%">
+      <col style="width:16%">
+      <col style="width:6.8%">
+      <col style="width:6.8%">
+      <col style="width:6.8%">
+      <col style="width:6.8%">
+      <col style="width:6.8%">
+      <col style="width:6.8%">
+      <col style="width:8%">
+    `;
   }else{
-    cg.innerHTML=`<col style="width:16%"><col style="width:34%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:8%">`;
+    cg.innerHTML = `
+      <col style="width:16%">
+      <col style="width:34%">
+      <col style="width:7%">
+      <col style="width:7%">
+      <col style="width:7%">
+      <col style="width:7%">
+      <col style="width:7%">
+      <col style="width:7%">
+      <col style="width:8%">
+    `;
   }
 }
 function fitTableToPanel(){
@@ -243,12 +347,12 @@ function renderTabla(data){
         <td title="${f.establecimiento}">${f.establecimiento}</td>
         <td>${f.ira}</td><td>${f.neumonias}</td><td>${f.sob_asma}</td><td>${f.eda_acuosa}</td><td>${f.disenterica}</td><td>${f.feb}</td>
         <td class="obs-cell">
-		<input class="obs-input" type="text"
-         value="${(getObs(y,w,f)).replace(/"/g,'&quot;')}"
-         data-renaes="${f.renaes||''}"
-         data-est="${(f.establecimiento||'').replace(/"/g,'&quot;')}">
-		<span class="obs-display">${(getObs(y,w,f))}</span>
-		</td>
+          <input class="obs-input" type="text"
+           value="${(getObs(y,w,f)).replace(/"/g,'&quot;')}"
+           data-renaes="${f.renaes||''}"
+           data-est="${(f.establecimiento||'').replace(/"/g,'&quot;')}">
+          <span class="obs-display">${(getObs(y,w,f))}</span>
+        </td>
       </tr>`).join('');
   }else{
     const g=groupBy(filas,f=>(f.ris||'').trim()); const blocks=[];
@@ -288,14 +392,13 @@ document.getElementById('tabla-wrap')?.addEventListener('input',(ev)=>{
   const w = parseInt(document.getElementById('semana').value,10);
   const f = { renaes: inp.dataset.renaes, establecimiento: inp.dataset.est };
   setObs(y, w, f, inp.value);
-  // refleja en el span visible durante la captura
   const span = inp.parentElement.querySelector('.obs-display');
   if (span) span.textContent = inp.value;
 });
 
-/* ---------- Semana epidemiológica (PAHO: semana con 4 de enero) ---------- */
+/* ---------- Semana epidemiológica ---------- */
 function startOfSE1(year){const jan4=new Date(year,0,4);const dow=jan4.getDay();const sunday=new Date(jan4);sunday.setDate(jan4.getDate()-dow);return sunday}
-function rangoSE(year,se){const start=startOfSE1(year);start.setDate(start.getDate()+(se-1)*7);const end=new Date(start);end.setDate(start.getDate()+6);return {ini:start,fin:end}}
+function rangoSE(year,se){const start=startOfSE1(year);start.setDate(start.getDate()+(se-1)*7);const end=new Date(start);end.setDate(start.getDate()+6);return {ini:start,fin=end}}
 const dfmt=d=>d.toLocaleDateString('es-PE',{day:'2-digit',month:'short'});
 function actualizarEncabezadoSE(){const y=parseInt(document.getElementById('ano')?.value,10);const w=parseInt(document.getElementById('semana')?.value,10);const h2=document.getElementById('titulo-reporte');if(!y||!w||!h2)return;const {ini,fin}=rangoSE(y,w);h2.textContent=`2) Consolidado por Establecimiento — SEMANA EPIDEMIOLÓGICA ${w} (${dfmt(ini)}–${dfmt(fin)} ${y})`}
 
@@ -310,8 +413,8 @@ async function subirYConsolidar(){
     await uploadCsv(document.getElementById('file-iras'),'iras.csv');
     await uploadCsv(document.getElementById('file-edas'),'edas.csv');
     await uploadCsv(document.getElementById('file-febriles'),'febriles.csv');
-    await uploadCsv(document.getElementById('file-individual'),'individual.csv');
-    await uploadCsv(document.getElementById('file-maestro'),'eess_maestro.csv');
+    // Maestro: ahora se asegura automáticamente desde URL
+    await asegurarMaestro();
 
     await refrescarArchivos();
 
@@ -326,13 +429,10 @@ async function subirYConsolidar(){
 async function capturarJPG(){
   actualizarEncabezadoSE();
 
-  // 1) activar modo captura (muestra spans y oculta inputs)
   document.body.classList.add('capturando');
-  // sincroniza spans por si quedaron desfasados
   document.querySelectorAll('input.obs-input').forEach(inp=>{
     const span = inp.parentElement.querySelector('.obs-display');
     if (span) span.textContent = inp.value;
-    // truco adicional: html2canvas a veces usa el atributo
     inp.setAttribute('value', inp.value);
   });
 
@@ -356,11 +456,8 @@ async function capturarJPG(){
   a.click();
 
   if(wrapTabla && !prevCompact) wrapTabla.classList.remove('compact');
-
-  // 2) salir de modo captura
   document.body.classList.remove('capturando');
 }
-
 
 async function generarTablaNotificante(){
   try{
@@ -401,7 +498,7 @@ function renderPivot(data){
     rows=rows.filter(r=>!esSaludMental({establecimiento:r.label}));
     const colSums=new Array(semanas.length).fill(0);
     rows.forEach(r=>r.values.forEach((v,i)=>colSums[i]+= (v|0)));
-    total={label:'TOTALES',values:colSums,total:colSums.reduce((a,b)=>a+b,0)};
+    total={label:'TOTALES',values:colSums, total:colSums.reduce((a,b)=>a+b,0)};
   }
   const t=document.getElementById('pivot-table');
   let thead=`<thead><tr><th class="pv-sticky">${data.groupBy==='estab'?'ESTABLECIMIENTO':'RIS'}</th>${semanas.map(s=>`<th>SE ${s}</th>`).join('')}<th>TOTAL</th><th>TENDENCIA</th></tr></thead>`;
@@ -442,11 +539,14 @@ document.getElementById('chk-excluir-mental')?.addEventListener('change',(e)=>{
   if(document.getElementById('card-pivot').style.display==='block') cargarPivot();
 });
 
-/* Inicial */
-buildColgroup();
-refrescarArchivos();
-cargarOpcionesRIS();
-actualizarEncabezadoSE();
+/* Inicial — ahora asegurado al estar el DOM listo */
+window.addEventListener('DOMContentLoaded', () => {
+  buildColgroup();
+  refrescarArchivos();
+  cargarOpcionesRIS();
+  actualizarEncabezadoSE();
+  asegurarMaestro(); // maestro auto
+});
 </script>
 </body>
 </html>
