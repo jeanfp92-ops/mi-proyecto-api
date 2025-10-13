@@ -2,8 +2,8 @@
 using System.Globalization;
 using System.Linq;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.ResponseCompression;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +17,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddRouting(o => o.LowercaseUrls = true);
 
+// Rendimiento
+builder.Services.AddResponseCompression(o => { o.EnableForHttps = true; });
+builder.Services.AddMemoryCache();
+
 var app = builder.Build();
 
 app.UseSwagger();
@@ -24,6 +28,7 @@ app.UseSwaggerUI();
 
 app.UseDefaultFiles(); // sirve index.html primero
 app.UseStaticFiles();
+app.UseResponseCompression();
 
 // ===== Helpers de archivos =====
 static string BaseDir() => AppContext.BaseDirectory;
@@ -223,13 +228,66 @@ static int? MaestroGetUbigeo(Dictionary<string, object> r)
     return null;
 }
 
+// ========= CACHE DE DATOS (iras/edas/feb/maestro) =========
+static readonly object _cacheLock = new();
+
+static (List<Dictionary<string,object>> iras,
+        List<Dictionary<string,object>> edas,
+        List<Dictionary<string,object>> febs,
+        Dictionary<string, Dictionary<string,object>> maestroByCode,
+        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes)? _cache;
+
+static (List<Dictionary<string,object>> iras,
+        List<Dictionary<string,object>> edas,
+        List<Dictionary<string,object>> febs,
+        Dictionary<string, Dictionary<string,object>> maestroByCode) GetSnapshot()
+{
+    string dir = ResolveDataDir();
+
+    string pI = Path.Combine(dir, "iras.csv");
+    string pE = Path.Combine(dir, "edas.csv");
+    string pF = Path.Combine(dir, "febriles.csv");
+    string pM = Path.Combine(dir, "eess_maestro.csv");
+
+    var mI = File.Exists(pI) ? File.GetLastWriteTimeUtc(pI) : DateTime.MinValue;
+    var mE = File.Exists(pE) ? File.GetLastWriteTimeUtc(pE) : DateTime.MinValue;
+    var mF = File.Exists(pF) ? File.GetLastWriteTimeUtc(pF) : DateTime.MinValue;
+    var mM = File.Exists(pM) ? File.GetLastWriteTimeUtc(pM) : DateTime.MinValue;
+
+    lock (_cacheLock)
+    {
+        if (_cache is null || _cache.Value.mtimes != (mI,mE,mF,mM))
+        {
+            var iras = ReadCsv(pI);
+            var edas = ReadCsv(pE);
+            var febs = ReadCsv(pF);
+            var maestroRows = ReadCsv(pM);
+
+            var maestroByCode = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in maestroRows)
+            {
+                var code = MaestroGetCode(r)?.Trim();
+                if (!string.IsNullOrEmpty(code)) maestroByCode[code] = r;
+            }
+
+            _cache = (iras, edas, febs, maestroByCode, (mI,mE,mF,mM));
+        }
+
+        return (_cache.Value.iras, _cache.Value.edas, _cache.Value.febs, _cache.Value.maestroByCode);
+    }
+}
+
+static void InvalidateSnapshot()
+{
+    lock (_cacheLock) { _cache = null; }
+}
+
 // Catálogo de RIS (desde eess_maestro.csv)
 app.MapGet("/api/epi/ris-options", () =>
 {
-    string dir = ResolveDataDir();
-    var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
+    var (_, _, _, maestroByCode) = GetSnapshot();
 
-    var options = maestroRows
+    var options = maestroByCode.Values
         .Select(r => MaestroGetRIS(r))
         .Where(s => !string.IsNullOrWhiteSpace(s))
         .Select(s => s!.Trim())
@@ -255,18 +313,8 @@ app.MapGet("/api/epi/pivot", (
     semana_ini = Math.Max(1, Math.Min(53, semana_ini));
     semana_fin = Math.Max(semana_ini, Math.Min(53, semana_fin));
 
-    string dir = ResolveDataDir();
-    var iras = ReadCsv(Path.Combine(dir, "iras.csv"));
-    var edas = ReadCsv(Path.Combine(dir, "edas.csv"));
-    var febs = ReadCsv(Path.Combine(dir, "febriles.csv"));
-    var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
-
-    var maestroByCode = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
-    foreach (var r in maestroRows)
-    {
-        var code = MaestroGetCode(r)?.Trim();
-        if (!string.IsNullOrEmpty(code)) maestroByCode[code] = r;
-    }
+    // 🔥 usar cache
+    var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
     IEnumerable<Dictionary<string, object>> fuente = indicator switch
     {
@@ -361,6 +409,7 @@ app.MapGet("/api/epi/pivot", (
 });
 // ======================= /PIVOT SEMANAL POR VIGILANCIA =========================
 
+
 // ========= ENDPOINTS =========
 // 1) Subida segura de CSVs a /uploads
 // Acepta: iras.csv, edas.csv, febriles.csv, individual.csv, eess_maestro.csv
@@ -402,6 +451,10 @@ app.MapPost("/api/upload", async (HttpRequest req) =>
 
         saved.Add(new { file = safeName, path = dest });
     }
+
+    // 🔥 importante: fuerza recarga del snapshot en la próxima consulta
+    InvalidateSnapshot();
+
     return Results.Ok(new { ok = true, saved, count = saved.Count });
 });
 
@@ -425,20 +478,8 @@ app.MapGet("/api/epi/summary", (
 {
     try
     {
-        string dir = ResolveDataDir();
-
-        var iras = ReadCsv(Path.Combine(dir, "iras.csv"));
-        var edas = ReadCsv(Path.Combine(dir, "edas.csv"));
-        var feb  = ReadCsv(Path.Combine(dir, "febriles.csv"));
-        var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
-
-        var maestroByCode = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in maestroRows)
-        {
-            var code = MaestroGetCode(r)?.Trim();
-            if (string.IsNullOrEmpty(code)) continue;
-            maestroByCode[code] = r;
-        }
+        // 🔥 usar cache
+        var (iras, edas, var feb, maestroByCode) = GetSnapshot();
 
         bool PassRis(Dictionary<string, object>? m)
         {
@@ -447,6 +488,7 @@ app.MapGet("/api/epi/summary", (
             return string.Equals(r?.Trim(), ris.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
+        // EESS que notifican en la SE (por RENAES detectado) — SIN filtrar por ubigeo
         HashSet<string> eessNotificadores = new(StringComparer.OrdinalIgnoreCase);
         foreach (var src in new[] { iras, edas, feb })
         foreach (var row in src)
@@ -458,6 +500,7 @@ app.MapGet("/api/epi/summary", (
                 eessNotificadores.Add(es!);
         }
 
+        // Universo final (respeta filtro RIS si tenemos maestro)
         HashSet<string> universe = new(StringComparer.OrdinalIgnoreCase);
 
         if (includeAll)
@@ -478,6 +521,7 @@ app.MapGet("/api/epi/summary", (
             }
         }
 
+        // Filtro por fuente/EESS
         IEnumerable<Dictionary<string, object>> FilterSrc(IEnumerable<Dictionary<string, object>> rows, string es) =>
             rows.Where(r =>
             {
@@ -501,22 +545,27 @@ app.MapGet("/api/epi/summary", (
             return $"{r}__{n}";
         }))
         {
-            var irasRows = FilterSrc(iras, es).ToList();
-            var edasRows = FilterSrc(edas, es).ToList();
-            var febRows  = FilterSrc(feb , es).ToList();
+            // Micro-optimización: sumar en streaming (sin crear listas)
+            double ira = 0, neu = 0, sob = 0;
+            foreach (var r in FilterSrc(iras, es))
+            {
+                ira += SumAny(new[] { r }, "ira_", "ira");
+                neu += SumAny(new[] { r }, "neu_", "neumonia", "neumonias");
+                sob += SumAny(new[] { r }, "sob_", "sob_asma", "asma");
+            }
 
-            double ira = SumAny(irasRows, "ira_", "ira");
-            double neu = SumAny(irasRows, "neu_", "neumonia", "neumonias");
-            double sob = SumAny(irasRows, "sob_", "sob_asma", "asma");
-
-            double daa = SumAny(edasRows, "daa_", "eda_acuosa", "eda");
-            double dis = SumAny(edasRows, "dis_", "disenterica");
+            double daa = 0, dis = 0;
+            foreach (var r in FilterSrc(edas, es))
+            {
+                daa += SumAny(new[] { r }, "daa_", "eda_acuosa", "eda");
+                dis += SumAny(new[] { r }, "dis_", "disenterica");
+            }
 
             double febTot = 0;
-            if (febRows.Count > 0)
+            foreach (var r in FilterSrc(feb, es))
             {
-                double ft = SumAny(febRows, "feb_tot");
-                febTot = ft > 0 ? ft : SumAny(febRows, "feb_", "feb");
+                var ft = SumAny(new[] { r }, "feb_tot");
+                febTot += ft > 0 ? ft : SumAny(new[] { r }, "feb_", "feb");
             }
 
             var totalAll = ira + neu + sob + daa + dis + febTot;
@@ -547,7 +596,7 @@ app.MapGet("/api/epi/summary", (
 
         var result = new {
             ano, semana,
-            ubigeo = (int?)null,
+            ubigeo = (int?)null, // compatibilidad
             ris, includeAll,
             conteo_estab_notificados = notifYes,
             conteo_estab_no_notificados = notifNo,
@@ -568,21 +617,18 @@ app.MapGet("/api/epi/summary", (
 // 4) Diagnóstico de maestro: vacíos y duplicados
 app.MapGet("/api/diag/maestro-issues", () =>
 {
-    string dir = ResolveDataDir();
-    var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
+    var (_, _, _, maestroByCode) = GetSnapshot();
 
-    var groups = maestroRows
-        .Select(r => new { Code = MaestroGetCode(r)?.Trim(), Row = r })
-        .GroupBy(x => x.Code, StringComparer.OrdinalIgnoreCase)
+    var groups = maestroByCode
+        .GroupBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    var vacios = groups.Where(g => string.IsNullOrEmpty(g.Key))
-                       .SelectMany(g => g.Select(x => x.Row))
-                       .Count();
+    var vacios = 0; // ya filtramos vacíos al indexar
 
-    var duplicados = groups
-        .Where(g => !string.IsNullOrEmpty(g.Key) && g.Count() > 1)
-        .Select(g => new { renaes = g.Key!, count = g.Count() })
+    var duplicados = maestroByCode
+        .GroupBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+        .Where(g => g.Count() > 1)
+        .Select(g => new { renaes = g.Key, count = g.Count() })
         .OrderByDescending(x => x.count)
         .ThenBy(x => x.renaes)
         .ToList();
@@ -620,10 +666,9 @@ static void GuardarCsv(RespuestaReporte rep)
 
 app.MapPost("/api/reporte/notificacion-semanal", (PayloadReporte payload) =>
 {
-    string dir = ResolveDataDir();
-    var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
+    var (_, _, _, maestroByCode) = GetSnapshot();
 
-    var maestro = maestroRows
+    var maestro = maestroByCode.Values
         .Select(r => new {
             renaes = MaestroGetCode(r)?.Trim() ?? "",
             nombre = MaestroGetNombre(r),
