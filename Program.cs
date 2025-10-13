@@ -4,7 +4,6 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using static SuperMegaSistemaEpi.AppUtils;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,16 +27,20 @@ app.UseStaticFiles();
 
 // ===== Helpers de archivos =====
 static string BaseDir() => AppContext.BaseDirectory;
+
 static string UploadsDir()
 {
-    var d = Path.Combine(BaseDir(), "uploads");
+    // En Render, solo /tmp es escribible; si defines UPLOAD_DIR (p.ej. /data/uploads con Disk), se usa eso.
+    var d = Environment.GetEnvironmentVariable("UPLOAD_DIR");
+    if (string.IsNullOrWhiteSpace(d)) d = "/tmp/uploads";
     Directory.CreateDirectory(d);
     return d;
 }
+
 static string DataDir()
 {
+    // Datos "semilla" (de solo lectura). No crear en runtime (el FS /app es read-only en Render).
     var d = Path.Combine(BaseDir(), "data");
-    Directory.CreateDirectory(d);
     return d;
 }
 
@@ -116,7 +119,6 @@ static string? NormalizeRenaes(string? s)
 // Detección robusta del código EESS en FUENTES (iras/edas/febriles)
 static string? GetEessCode(Dictionary<string, object> r)
 {
-    // intentos por nombre de columna típico (incluye SUB_REG_NT que a veces trae el RENAES)
     foreach (var k in new[] { "renaes","e_salud","e_sal","esalud","eess","cod_eess","codigo_eess","codigo","establecimiento","sub_reg_nt" })
     {
         if (r.TryGetValue(k, out var v))
@@ -125,7 +127,6 @@ static string? GetEessCode(Dictionary<string, object> r)
             if (n != null) return n;
         }
     }
-    // escanea todas las columnas buscando algo que parezca RENAES
     foreach (var kv in r)
     {
         var n = NormalizeRenaes(Convert.ToString(kv.Value));
@@ -172,10 +173,6 @@ static double SumAny(IEnumerable<Dictionary<string, object>> rows, params string
 }
 
 // ======= Maestro helpers (para tu eess_maestro.csv) =======
-// Columnas típicas: registroId, cod_est, raz_soc, subregion, red, microred, notifica, tipo, nivel,
-//                   renaes, categoria, estado, insti_rn, ubigeo_rn
-
-// Busca el RENAES en columnas típicas y, si no, escanea todas las columnas por patrón.
 static string? MaestroGetCode(Dictionary<string, object> r)
 {
     var c = TryStr(r, "renaes") ?? TryStr(r, "e_salud");
@@ -192,7 +189,6 @@ static string? MaestroGetCode(Dictionary<string, object> r)
 
 static string MaestroGetNombre(Dictionary<string, object> r)
 {
-    // más alias por si tu CSV trae otro encabezado
     var s = TryStr(r, "raz_soc")
          ?? TryStr(r, "establecimiento")
          ?? TryStr(r, "nombre")
@@ -204,22 +200,17 @@ static string MaestroGetNombre(Dictionary<string, object> r)
 
 static string? MaestroGetRIS(Dictionary<string, object> r)
 {
-    // 1) Usa el campo RIS del maestro si existe (RIS/ris/Ris)
     var s = TryStr(r, "RIS") ?? TryStr(r, "ris") ?? TryStr(r, "Ris");
     if (!string.IsNullOrWhiteSpace(s))
     {
         s = s.Trim();
-        // A veces viene con un prefijo numérico "1 " o "0 " -> lo quitamos
-        s = Regex.Replace(s, @"^\s*\d+\s*", "");
+        s = Regex.Replace(s, @"^\s*\d+\s*", ""); // quita prefijos numéricos
         return s;
     }
-
-    // 2) Solo si no hay RIS, usa subregion como fallback
     var sub = TryStr(r, "subregion")?.Trim();
     return string.IsNullOrWhiteSpace(sub) ? null : sub;
 }
 
-// Devuelve el ubigeo del maestro; si no viene, lo deriva del RENAES (primeros 6 dígitos)
 static int? MaestroGetUbigeo(Dictionary<string, object> r)
 {
     var s = (TryStr(r, "ubigeo_rn") ?? TryStr(r, "ubigeo"))?.Trim();
@@ -249,12 +240,7 @@ app.MapGet("/api/epi/ris-options", () =>
     return Results.Ok(new { options });
 });
 
-
-
 // ========================= PIVOT SEMANAL POR VIGILANCIA =========================
-// GET /api/epi/pivot?ano=2025&indicator=EDA&groupBy=estab&semana_ini=1&semana_fin=38&ris=...
-// indicator: EDA | IRA | NEU | SOBASMA | FEB
-// groupBy:  estab | ris
 app.MapGet("/api/epi/pivot", (
     int ano,
     string indicator,
@@ -351,8 +337,8 @@ app.MapGet("/api/epi/pivot", (
 
     var totalesCol = new int[weeks];
     foreach (var it in listado)
-    for (int i = 0; i < weeks; i++)
-        totalesCol[i] += (int)Math.Round(it.values[i]);
+        for (int i = 0; i < weeks; i++)
+            totalesCol[i] += (int)Math.Round(it.values[i]);
 
     var payload = new {
         indicator,
@@ -392,6 +378,10 @@ app.MapPost("/api/upload", async (HttpRequest req) =>
     {
         if (file.Length == 0) continue;
 
+        // Límite defensivo (20 MB)
+        if (file.Length > 20 * 1024 * 1024)
+            return Results.BadRequest("Archivo supera 20 MB.");
+
         var safeName = Path.GetFileName(file.FileName).ToLowerInvariant();
         if (!allowed.Contains(safeName))
             return Results.BadRequest($"Nombre no permitido: {safeName}");
@@ -425,7 +415,6 @@ app.MapGet("/api/files", () =>
     return Results.Ok(files);
 });
 
-// 3) Resumen por EESS (con maestro y filtros) — se usa para la tabla de la derecha
 // 3) Resumen por EESS (con maestro y filtros) — SIN UBIGEO
 app.MapGet("/api/epi/summary", (
     int ano,
@@ -438,13 +427,11 @@ app.MapGet("/api/epi/summary", (
     {
         string dir = ResolveDataDir();
 
-        // Fuentes
         var iras = ReadCsv(Path.Combine(dir, "iras.csv"));
         var edas = ReadCsv(Path.Combine(dir, "edas.csv"));
         var feb  = ReadCsv(Path.Combine(dir, "febriles.csv"));
-        var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv")); // opcional
+        var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
 
-        // Maestro indexado por RENAES normalizado
         var maestroByCode = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in maestroRows)
         {
@@ -453,7 +440,6 @@ app.MapGet("/api/epi/summary", (
             maestroByCode[code] = r;
         }
 
-        // Filtro RIS (con Trim)
         bool PassRis(Dictionary<string, object>? m)
         {
             if (string.IsNullOrWhiteSpace(ris)) return true;
@@ -461,31 +447,23 @@ app.MapGet("/api/epi/summary", (
             return string.Equals(r?.Trim(), ris.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        // EESS que notifican en la SE (por RENAES detectado) — SIN filtrar por ubigeo
         HashSet<string> eessNotificadores = new(StringComparer.OrdinalIgnoreCase);
         foreach (var src in new[] { iras, edas, feb })
+        foreach (var row in src)
         {
-            foreach (var row in src)
-            {
-                int ra = TryInt(row, "ano") ?? TryInt(row, "anio") ?? TryInt(row, "año") ?? -1;
-                int rs = TryInt(row, "semana") ?? TryInt(row, "se") ?? -1;
-                string? es = GetEessCode(row);
-                if (ra == ano && rs == semana && !string.IsNullOrWhiteSpace(es))
-                    eessNotificadores.Add(es!);
-            }
+            int ra = TryInt(row, "ano") ?? TryInt(row, "anio") ?? TryInt(row, "año") ?? -1;
+            int rs = TryInt(row, "semana") ?? TryInt(row, "se") ?? -1;
+            string? es = GetEessCode(row);
+            if (ra == ano && rs == semana && !string.IsNullOrWhiteSpace(es))
+                eessNotificadores.Add(es!);
         }
 
-        // Universo final (respeta filtro RIS si tenemos maestro)
         HashSet<string> universe = new(StringComparer.OrdinalIgnoreCase);
 
         if (includeAll)
         {
             foreach (var kv in maestroByCode)
-            {
-                var m = kv.Value;
-                if (!PassRis(m)) continue;
-                universe.Add(kv.Key);
-            }
+                if (PassRis(kv.Value)) universe.Add(kv.Key);
         }
 
         foreach (var es in eessNotificadores)
@@ -494,15 +472,12 @@ app.MapGet("/api/epi/summary", (
             {
                 if (PassRis(m)) universe.Add(es);
             }
-            else
+            else if (string.IsNullOrWhiteSpace(ris))
             {
-                // si no hay maestro para ese RENAES, solo incluirlo si NO se filtró por RIS
-                if (string.IsNullOrWhiteSpace(ris))
-                    universe.Add(es);
+                universe.Add(es);
             }
         }
 
-        // Filtro por fuente/EESS
         IEnumerable<Dictionary<string, object>> FilterSrc(IEnumerable<Dictionary<string, object>> rows, string es) =>
             rows.Where(r =>
             {
@@ -572,7 +547,7 @@ app.MapGet("/api/epi/summary", (
 
         var result = new {
             ano, semana,
-            ubigeo = (int?)null, // compatibilidad; ya no filtramos por ubigeo
+            ubigeo = (int?)null,
             ris, includeAll,
             conteo_estab_notificados = notifYes,
             conteo_estab_no_notificados = notifNo,
@@ -589,7 +564,6 @@ app.MapGet("/api/epi/summary", (
         return Results.Problem(title: "Summary error", detail: ex.ToString(), statusCode: 500);
     }
 });
-
 
 // 4) Diagnóstico de maestro: vacíos y duplicados
 app.MapGet("/api/diag/maestro-issues", () =>
@@ -617,7 +591,6 @@ app.MapGet("/api/diag/maestro-issues", () =>
 });
 
 // 5) ===== Reporte “Tabla notificante por establecimiento” =====
-
 static string UltimoReporteCsvPath() => Path.Combine(DataDir(), "tablas_notificante.csv");
 
 static void GuardarCsv(RespuestaReporte rep)
@@ -647,7 +620,6 @@ static void GuardarCsv(RespuestaReporte rep)
 
 app.MapPost("/api/reporte/notificacion-semanal", (PayloadReporte payload) =>
 {
-    // Cargar maestro
     string dir = ResolveDataDir();
     var maestroRows = ReadCsv(Path.Combine(dir, "eess_maestro.csv"));
 
@@ -661,13 +633,11 @@ app.MapPost("/api/reporte/notificacion-semanal", (PayloadReporte payload) =>
         .Where(x => !string.IsNullOrEmpty(x.renaes))
         .ToList();
 
-    // Filtrar por ubigeo y RIS
     var mFiltrado = maestro.Where(m =>
         (m.ubigeo.HasValue && m.ubigeo.Value.ToString().StartsWith(payload.ubigeo)) &&
         (string.IsNullOrWhiteSpace(payload.ris) || string.Equals(m.ris, payload.ris, StringComparison.OrdinalIgnoreCase))
     ).OrderBy(m => m.ris).ThenBy(m => m.nombre).ToList();
 
-    // Consolidado recibido (derecha) → dic por renaes (normalizado)
     var dic = payload.filas
         .GroupBy(x => NormalizeRenaes(x.renaes.Trim()) ?? x.renaes.Trim(), StringComparer.OrdinalIgnoreCase)
         .ToDictionary(g => g.Key, g => new {
@@ -731,9 +701,7 @@ app.MapGet("/api/reporte/notificacion-semanal.csv", () =>
 
 app.Run();
 
-
 // ===================== Tipos usados por el endpoint de reporte =====================
-// (Deben ir después de las instrucciones de nivel superior para evitar CS8803)
 record FilaConsolidado(string renaes, int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb);
 record PayloadReporte(int anio, int semana, string ubigeo, string? ris, List<FilaConsolidado> filas);
 
