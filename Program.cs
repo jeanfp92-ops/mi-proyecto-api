@@ -227,21 +227,8 @@ static int? MaestroGetUbigeo(Dictionary<string, object> r)
 
     return null;
 }
-// ========= CACHE DE DATOS (iras/edas/feb/maestro) =========
-// En top-level no se permiten campos estáticos sueltos. Los metemos en una clase estática.
-static class CacheState
-{
-    public static readonly object Lock = new();
 
-    public static (
-        List<Dictionary<string,object>> iras,
-        List<Dictionary<string,object>> edas,
-        List<Dictionary<string,object>> febs,
-        Dictionary<string, Dictionary<string,object>> maestroByCode,
-        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes
-    )? Snapshot;
-}
-
+// ========= CACHE / SNAPSHOT =========
 static (List<Dictionary<string,object>> iras,
         List<Dictionary<string,object>> edas,
         List<Dictionary<string,object>> febs,
@@ -324,7 +311,6 @@ app.MapGet("/api/epi/pivot", (
     semana_ini = Math.Max(1, Math.Min(53, semana_ini));
     semana_fin = Math.Max(semana_ini, Math.Min(53, semana_fin));
 
-    // usar cache
     var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
     IEnumerable<Dictionary<string, object>> fuente = indicator switch
@@ -479,7 +465,7 @@ app.MapGet("/api/files", () =>
     return Results.Ok(files);
 });
 
-// 3) Resumen por EESS (con maestro y filtros) — SIN UBIGEO
+// 3) Resumen por EESS (con maestro y filtros)
 app.MapGet("/api/epi/summary", (
     int ano,
     int semana,
@@ -489,7 +475,6 @@ app.MapGet("/api/epi/summary", (
 {
     try
     {
-        // usar cache
         var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
         bool PassRis(Dictionary<string, object>? m)
@@ -499,7 +484,7 @@ app.MapGet("/api/epi/summary", (
             return string.Equals(r?.Trim(), ris.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        // EESS que notifican en la SE (por RENAES detectado)
+        // EESS que notifican en la SE
         HashSet<string> eessNotificadores = new(StringComparer.OrdinalIgnoreCase);
         foreach (var src in new[] { iras, edas, febs })
         foreach (var row in src)
@@ -532,7 +517,6 @@ app.MapGet("/api/epi/summary", (
             }
         }
 
-        // Filtro por fuente/EESS
         IEnumerable<Dictionary<string, object>> FilterSrc(IEnumerable<Dictionary<string, object>> rows, string es) =>
             rows.Where(r =>
             {
@@ -556,7 +540,6 @@ app.MapGet("/api/epi/summary", (
             return $"{r}__{n}";
         }))
         {
-            // sumas
             double ira = 0, neu = 0, sob = 0;
             foreach (var r in FilterSrc(iras, es))
             {
@@ -607,7 +590,7 @@ app.MapGet("/api/epi/summary", (
 
         var result = new {
             ano, semana,
-            ubigeo = (int?)null, // compatibilidad
+            ubigeo = (int?)null,
             ris, includeAll,
             conteo_estab_notificados = notifYes,
             conteo_estab_no_notificados = notifNo,
@@ -625,7 +608,7 @@ app.MapGet("/api/epi/summary", (
     }
 });
 
-// 4) Diagnóstico de maestro: vacíos y duplicados
+// 4) Diagnóstico de maestro
 app.MapGet("/api/diag/maestro-issues", () =>
 {
     var (_, _, _, maestroByCode) = GetSnapshot();
@@ -759,6 +742,7 @@ app.Run();
 
 // ===================== Tipos usados por el endpoint de reporte =====================
 
+// ¡SOLO UNA VEZ! (la otra definición se eliminó)
 static class CacheState
 {
     public static readonly object Lock = new();
@@ -772,7 +756,7 @@ static class CacheState
     )? Snapshot;
 }
 
-// Tus records:
+// Records
 record FilaConsolidado(string renaes, int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb);
 record PayloadReporte(int anio, int semana, string ubigeo, string? ris, List<FilaConsolidado> filas);
 record FilaSalida(string ris, string establecimiento, string renaes,
@@ -781,4 +765,3 @@ record FilaSalida(string ris, string establecimiento, string renaes,
 record RespuestaReporte(int anio, int semana, string ubigeo, string? ris,
                         int total_establecimientos, int establecimientos_notificados, int establecimientos_no_notificados,
                         List<FilaSalida> filas);
-
