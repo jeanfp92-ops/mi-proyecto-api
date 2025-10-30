@@ -758,13 +758,27 @@ app.Run();
 
 
 // ===================== Tipos usados por el endpoint de reporte =====================
+
+static class CacheState
+{
+    public static readonly object Lock = new();
+
+    public static (
+        List<Dictionary<string,object>> iras,
+        List<Dictionary<string,object>> edas,
+        List<Dictionary<string,object>> febs,
+        Dictionary<string, Dictionary<string,object>> maestroByCode,
+        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes
+    )? Snapshot;
+}
+
+// Tus records:
 record FilaConsolidado(string renaes, int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb);
 record PayloadReporte(int anio, int semana, string ubigeo, string? ris, List<FilaConsolidado> filas);
-
 record FilaSalida(string ris, string establecimiento, string renaes,
                   int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb,
                   string observaciones);
-
 record RespuestaReporte(int anio, int semana, string ubigeo, string? ris,
                         int total_establecimientos, int establecimientos_notificados, int establecimientos_no_notificados,
                         List<FilaSalida> filas);
+
