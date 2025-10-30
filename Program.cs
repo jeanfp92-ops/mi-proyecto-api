@@ -26,25 +26,25 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 
-app.UseDefaultFiles(); // sirve index.html primero
+app.UseDefaultFiles(); // sirve index.html/dashboard.html primero si existe
 app.UseStaticFiles();
 app.UseResponseCompression();
 
 // ===== Helpers de archivos =====
 static string BaseDir() => AppContext.BaseDirectory;
 
+// En Render, solo /tmp es escribible; si defines UPLOAD_DIR (p.ej. /data/uploads con Disk), se usa eso.
 static string UploadsDir()
 {
-    // En Render, solo /tmp es escribible; si defines UPLOAD_DIR (p.ej. /data/uploads con Disk), se usa eso.
     var d = Environment.GetEnvironmentVariable("UPLOAD_DIR");
     if (string.IsNullOrWhiteSpace(d)) d = "/tmp/uploads";
     Directory.CreateDirectory(d);
     return d;
 }
 
+// Datos "semilla" (de solo lectura). No crear en runtime (el FS /app es read-only en Render).
 static string DataDir()
 {
-    // Datos "semilla" (de solo lectura). No crear en runtime (el FS /app es read-only en Render).
     var d = Path.Combine(BaseDir(), "data");
     return d;
 }
@@ -282,6 +282,9 @@ static void InvalidateSnapshot()
     lock (_cacheLock) { _cache = null; }
 }
 
+// ======= Endpoints básicos =======
+app.MapGet("/health", () => Results.Ok(new { ok = true }));
+
 // Catálogo de RIS (desde eess_maestro.csv)
 app.MapGet("/api/epi/ris-options", () =>
 {
@@ -313,7 +316,7 @@ app.MapGet("/api/epi/pivot", (
     semana_ini = Math.Max(1, Math.Min(53, semana_ini));
     semana_fin = Math.Max(semana_ini, Math.Min(53, semana_fin));
 
-    // 🔥 usar cache
+    // usar cache
     var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
     IEnumerable<Dictionary<string, object>> fuente = indicator switch
@@ -452,7 +455,7 @@ app.MapPost("/api/upload", async (HttpRequest req) =>
         saved.Add(new { file = safeName, path = dest });
     }
 
-    // 🔥 importante: fuerza recarga del snapshot en la próxima consulta
+    // fuerza recarga del snapshot en la próxima consulta
     InvalidateSnapshot();
 
     return Results.Ok(new { ok = true, saved, count = saved.Count });
@@ -472,14 +475,14 @@ app.MapGet("/api/files", () =>
 app.MapGet("/api/epi/summary", (
     int ano,
     int semana,
-    string? ris,           // ej: "RIS BCO-CHO-SURCO"
+    string? ris,           // ej: "RIS VMT"
     bool includeAll = true // incluir EESS del maestro aunque no notifiquen
 ) =>
 {
     try
     {
-        // 🔥 usar cache
-        var (iras, edas, var feb, maestroByCode) = GetSnapshot();
+        // usar cache
+        var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
         bool PassRis(Dictionary<string, object>? m)
         {
@@ -488,9 +491,9 @@ app.MapGet("/api/epi/summary", (
             return string.Equals(r?.Trim(), ris.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        // EESS que notifican en la SE (por RENAES detectado) — SIN filtrar por ubigeo
+        // EESS que notifican en la SE (por RENAES detectado)
         HashSet<string> eessNotificadores = new(StringComparer.OrdinalIgnoreCase);
-        foreach (var src in new[] { iras, edas, feb })
+        foreach (var src in new[] { iras, edas, febs })
         foreach (var row in src)
         {
             int ra = TryInt(row, "ano") ?? TryInt(row, "anio") ?? TryInt(row, "año") ?? -1;
@@ -545,7 +548,7 @@ app.MapGet("/api/epi/summary", (
             return $"{r}__{n}";
         }))
         {
-            // Micro-optimización: sumar en streaming (sin crear listas)
+            // sumas
             double ira = 0, neu = 0, sob = 0;
             foreach (var r in FilterSrc(iras, es))
             {
@@ -562,7 +565,7 @@ app.MapGet("/api/epi/summary", (
             }
 
             double febTot = 0;
-            foreach (var r in FilterSrc(feb, es))
+            foreach (var r in FilterSrc(febs, es))
             {
                 var ft = SumAny(new[] { r }, "feb_tot");
                 febTot += ft > 0 ? ft : SumAny(new[] { r }, "feb_", "feb");
@@ -619,12 +622,6 @@ app.MapGet("/api/diag/maestro-issues", () =>
 {
     var (_, _, _, maestroByCode) = GetSnapshot();
 
-    var groups = maestroByCode
-        .GroupBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
-        .ToList();
-
-    var vacios = 0; // ya filtramos vacíos al indexar
-
     var duplicados = maestroByCode
         .GroupBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
         .Where(g => g.Count() > 1)
@@ -633,15 +630,20 @@ app.MapGet("/api/diag/maestro-issues", () =>
         .ThenBy(x => x.renaes)
         .ToList();
 
-    return Results.Ok(new { vacios, duplicados });
+    return Results.Ok(new { vacios = 0, duplicados });
 });
 
 // 5) ===== Reporte “Tabla notificante por establecimiento” =====
-static string UltimoReporteCsvPath() => Path.Combine(DataDir(), "tablas_notificante.csv");
+static string UltimoReporteCsvPath()
+{
+    // Guardar SIEMPRE en carpeta escribible
+    return Path.Combine(UploadsDir(), "tablas_notificante.csv");
+}
 
 static void GuardarCsv(RespuestaReporte rep)
 {
     var path = UltimoReporteCsvPath();
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     using var sw = new StreamWriter(path, false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     sw.WriteLine($"SEMANA EPIDEMIOLÓGICA {rep.semana};AÑO {rep.anio};UBIGEO {rep.ubigeo};RIS {rep.ris}");
     sw.WriteLine($"ESTABLECIMIENTOS NOTIFICADOS;{rep.establecimientos_notificados}");
@@ -679,7 +681,7 @@ app.MapPost("/api/reporte/notificacion-semanal", (PayloadReporte payload) =>
         .ToList();
 
     var mFiltrado = maestro.Where(m =>
-        (m.ubigeo.HasValue && m.ubigeo.Value.ToString().StartsWith(payload.ubigeo)) &&
+        (string.IsNullOrWhiteSpace(payload.ubigeo) || (m.ubigeo.HasValue && m.ubigeo.Value.ToString().StartsWith(payload.ubigeo))) &&
         (string.IsNullOrWhiteSpace(payload.ris) || string.Equals(m.ris, payload.ris, StringComparison.OrdinalIgnoreCase))
     ).OrderBy(m => m.ris).ThenBy(m => m.nombre).ToList();
 
@@ -745,6 +747,7 @@ app.MapGet("/api/reporte/notificacion-semanal.csv", () =>
 });
 
 app.Run();
+
 
 // ===================== Tipos usados por el endpoint de reporte =====================
 record FilaConsolidado(string renaes, int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb);
