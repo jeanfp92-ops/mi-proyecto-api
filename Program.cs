@@ -2,7 +2,6 @@
 using System.Globalization;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.ResponseCompression;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -85,6 +84,8 @@ static List<Dictionary<string, object>> ReadCsv(string path)
     while ((line = sr.ReadLine()) != null)
     {
         if (string.IsNullOrWhiteSpace(line)) continue;
+        if (line.Length > 200_000) continue; // descarta líneas absurdamente largas
+
         var cols = line.Split(sep);
         var dict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < headers.Length; i++)
@@ -110,84 +111,87 @@ static string? TryStr(Dictionary<string, object> r, string key)
     return string.IsNullOrWhiteSpace(s) ? null : s;
 }
 
-// ====== Normalización y detección de RENAES ======
+// ====== Normalización/detección de RENAES SIN REGEX ======
 
-// Normaliza a formato 150140D101 (letra mayúscula, sin espacios)
-static string? NormalizeRenaes(string? s)
+// Normaliza capturando 6 dígitos + 1 letra + 3 dígitos (ej: 150140D101)
+static string? TryNormalizeRenaesFast(string? s)
 {
     if (string.IsNullOrWhiteSpace(s)) return null;
-    var m = Regex.Match(s.Trim(), @"^\s*(\d{6})([A-Za-z])(\d{3})\s*$");
-    if (!m.Success) return null;
-    return $"{m.Groups[1].Value}{m.Groups[2].Value.ToUpper()}{m.Groups[3].Value}";
-}
 
-// Detección robusta del código EESS en FUENTES (iras/edas/febriles)
-static string? GetEessCode(Dictionary<string, object> r)
-{
-    foreach (var k in new[] { "renaes","e_salud","e_sal","esalud","eess","cod_eess","codigo_eess","codigo","establecimiento","sub_reg_nt" })
+    // Filtra solo [0-9A-Za-z], toUpper y corta a 32
+    Span<char> buf = stackalloc char[32];
+    int n = 0;
+    foreach (var ch in s)
     {
-        if (r.TryGetValue(k, out var v))
+        if (char.IsLetterOrDigit(ch))
         {
-            var n = NormalizeRenaes(Convert.ToString(v));
-            if (n != null) return n;
+            if (n >= buf.Length) break;
+            buf[n++] = char.ToUpperInvariant(ch);
         }
     }
+    if (n < 10) return null;
+
+    // Ventana deslizante buscando 6D + 1L + 3D
+    for (int i = 0; i + 10 <= n; i++)
+    {
+        bool ok =
+            char.IsDigit(buf[i+0]) && char.IsDigit(buf[i+1]) && char.IsDigit(buf[i+2]) &&
+            char.IsDigit(buf[i+3]) && char.IsDigit(buf[i+4]) && char.IsDigit(buf[i+5]) &&
+            char.IsLetter(buf[i+6]) &&
+            char.IsDigit(buf[i+7]) && char.IsDigit(buf[i+8]) && char.IsDigit(buf[i+9]);
+
+        if (ok)
+            return new string(new[] {
+                buf[i+0], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5],
+                buf[i+6], buf[i+7], buf[i+8], buf[i+9]
+            });
+    }
+    return null;
+}
+
+// Detección robusta del código EESS en FUENTES (iras/edas/febriles) sin regex global
+static string? GetEessCode(Dictionary<string, object> r)
+{
+    string? TryKey(string k)
+        => r.TryGetValue(k, out var v) ? TryNormalizeRenaesFast(Convert.ToString(v)) : null;
+
+    // 1) llaves típicas
+    foreach (var k in new[] { "renaes","e_salud","e_sal","eess","cod_eess","codigo_eess","codigo","sub_reg_nt" })
+    {
+        var x = TryKey(k);
+        if (x != null) return x;
+    }
+
+    // 2) Fallback acotado: primeras 5 celdas "cortas"
+    int seen = 0;
     foreach (var kv in r)
     {
-        var n = NormalizeRenaes(Convert.ToString(kv.Value));
+        if (++seen > 5) break;
+        var val = Convert.ToString(kv.Value) ?? "";
+        if (val.Length > 32) continue;
+        var n = TryNormalizeRenaesFast(val);
         if (n != null) return n;
     }
     return null;
 }
 
-// Deriva ubigeo si la fila no lo trae
-static int? GetUbigeoOrFromRenaes(Dictionary<string, object> r)
-{
-    var u = TryInt(r, "ubigeo");
-    if (u.HasValue) return u.Value;
-
-    var code = GetEessCode(r);
-    if (code != null && code.Length >= 6 && int.TryParse(code.Substring(0, 6), out var uu))
-        return uu;
-
-    return null;
-}
-
-// Suma por claves o prefijos alternativos
-static double SumAny(IEnumerable<Dictionary<string, object>> rows, params string[] keysOrPrefixes)
-{
-    double s = 0;
-    foreach (var r in rows)
-    {
-        foreach (var kv in r)
-        {
-            var k = kv.Key.ToLowerInvariant();
-            foreach (var p in keysOrPrefixes)
-            {
-                var pp = p.ToLowerInvariant();
-                if (k == pp || k.StartsWith(pp))
-                {
-                    if (double.TryParse(Convert.ToString(kv.Value)?.Trim(), out var v))
-                        s += v;
-                    break;
-                }
-            }
-        }
-    }
-    return s;
-}
-
-// ======= Maestro helpers (para tu eess_maestro.csv) =======
+// ======= Maestro helpers (para eess_maestro.csv) =======
 static string? MaestroGetCode(Dictionary<string, object> r)
 {
     var c = TryStr(r, "renaes") ?? TryStr(r, "e_salud");
-    var n = NormalizeRenaes(c);
+    var n = TryNormalizeRenaesFast(c);
     if (n != null) return n;
 
+    int seen = 0;
     foreach (var kv in r)
     {
-        var nx = NormalizeRenaes(Convert.ToString(kv.Value));
-        if (nx != null) return nx;
+        if (++seen > 5) break;
+        var s = Convert.ToString(kv.Value);
+        if (s != null && s.Length <= 32)
+        {
+            var nx = TryNormalizeRenaesFast(s);
+            if (nx != null) return nx;
+        }
     }
     return null;
 }
@@ -209,8 +213,11 @@ static string? MaestroGetRIS(Dictionary<string, object> r)
     if (!string.IsNullOrWhiteSpace(s))
     {
         s = s.Trim();
-        s = Regex.Replace(s, @"^\s*\d+\s*", ""); // quita prefijos numéricos
-        return s;
+        // quita prefijo numérico (sin Regex)
+        int i = 0;
+        while (i < s.Length && char.IsDigit(s[i])) i++;
+        while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+        return s.Substring(i);
     }
     var sub = TryStr(r, "subregion")?.Trim();
     return string.IsNullOrWhiteSpace(sub) ? null : sub;
@@ -228,7 +235,21 @@ static int? MaestroGetUbigeo(Dictionary<string, object> r)
     return null;
 }
 
-// ========= CACHE / SNAPSHOT =========
+// ========= CACHE DE DATOS (iras/edas/feb/maestro) =========
+// En top-level no se permiten campos estáticos sueltos. Los metemos en una clase estática.
+static class CacheState
+{
+    public static readonly object Lock = new();
+
+    public static (
+        List<Dictionary<string,object>> iras,
+        List<Dictionary<string,object>> edas,
+        List<Dictionary<string,object>> febs,
+        Dictionary<string, Dictionary<string,object>> maestroByCode,
+        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes
+    )? Snapshot;
+}
+
 static (List<Dictionary<string,object>> iras,
         List<Dictionary<string,object>> edas,
         List<Dictionary<string,object>> febs,
@@ -311,6 +332,7 @@ app.MapGet("/api/epi/pivot", (
     semana_ini = Math.Max(1, Math.Min(53, semana_ini));
     semana_fin = Math.Max(semana_ini, Math.Min(53, semana_fin));
 
+    // usar cache
     var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
     IEnumerable<Dictionary<string, object>> fuente = indicator switch
@@ -465,7 +487,7 @@ app.MapGet("/api/files", () =>
     return Results.Ok(files);
 });
 
-// 3) Resumen por EESS (con maestro y filtros)
+// 3) Resumen por EESS (con maestro y filtros) — SIN UBIGEO
 app.MapGet("/api/epi/summary", (
     int ano,
     int semana,
@@ -475,6 +497,7 @@ app.MapGet("/api/epi/summary", (
 {
     try
     {
+        // usar cache
         var (iras, edas, febs, maestroByCode) = GetSnapshot();
 
         bool PassRis(Dictionary<string, object>? m)
@@ -484,7 +507,7 @@ app.MapGet("/api/epi/summary", (
             return string.Equals(r?.Trim(), ris.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        // EESS que notifican en la SE
+        // EESS que notifican en la SE (por RENAES detectado)
         HashSet<string> eessNotificadores = new(StringComparer.OrdinalIgnoreCase);
         foreach (var src in new[] { iras, edas, febs })
         foreach (var row in src)
@@ -517,6 +540,7 @@ app.MapGet("/api/epi/summary", (
             }
         }
 
+        // Filtro por fuente/EESS
         IEnumerable<Dictionary<string, object>> FilterSrc(IEnumerable<Dictionary<string, object>> rows, string es) =>
             rows.Where(r =>
             {
@@ -540,6 +564,7 @@ app.MapGet("/api/epi/summary", (
             return $"{r}__{n}";
         }))
         {
+            // sumas
             double ira = 0, neu = 0, sob = 0;
             foreach (var r in FilterSrc(iras, es))
             {
@@ -590,7 +615,7 @@ app.MapGet("/api/epi/summary", (
 
         var result = new {
             ano, semana,
-            ubigeo = (int?)null,
+            ubigeo = (int?)null, // compatibilidad
             ris, includeAll,
             conteo_estab_notificados = notifYes,
             conteo_estab_no_notificados = notifNo,
@@ -608,7 +633,7 @@ app.MapGet("/api/epi/summary", (
     }
 });
 
-// 4) Diagnóstico de maestro
+// 4) Diagnóstico de maestro: vacíos y duplicados
 app.MapGet("/api/diag/maestro-issues", () =>
 {
     var (_, _, _, maestroByCode) = GetSnapshot();
@@ -677,7 +702,7 @@ app.MapPost("/api/reporte/notificacion-semanal", (PayloadReporte payload) =>
     ).OrderBy(m => m.ris).ThenBy(m => m.nombre).ToList();
 
     var dic = payload.filas
-        .GroupBy(x => NormalizeRenaes(x.renaes.Trim()) ?? x.renaes.Trim(), StringComparer.OrdinalIgnoreCase)
+        .GroupBy(x => TryNormalizeRenaesFast(x.renaes.Trim()) ?? x.renaes.Trim(), StringComparer.OrdinalIgnoreCase)
         .ToDictionary(g => g.Key, g => new {
             ira = g.Sum(z => z.ira),
             neumonias = g.Sum(z => z.neumonias),
@@ -741,22 +766,6 @@ app.Run();
 
 
 // ===================== Tipos usados por el endpoint de reporte =====================
-
-// ¡SOLO UNA VEZ! (la otra definición se eliminó)
-static class CacheState
-{
-    public static readonly object Lock = new();
-
-    public static (
-        List<Dictionary<string,object>> iras,
-        List<Dictionary<string,object>> edas,
-        List<Dictionary<string,object>> febs,
-        Dictionary<string, Dictionary<string,object>> maestroByCode,
-        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes
-    )? Snapshot;
-}
-
-// Records
 record FilaConsolidado(string renaes, int ira, int neumonias, int sob_asma, int eda_acuosa, int disenterica, int feb);
 record PayloadReporte(int anio, int semana, string ubigeo, string? ris, List<FilaConsolidado> filas);
 record FilaSalida(string ris, string establecimiento, string renaes,
