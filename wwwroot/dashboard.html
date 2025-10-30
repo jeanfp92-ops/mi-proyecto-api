@@ -12,12 +12,10 @@
     .right-tabs .rtab{border:1px solid #cbd5e1;background:#f8fafc;padding:6px 10px;border-radius:8px;cursor:pointer;font-weight:600}
     .right-tabs .rtab.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
     .obs-cell input.obs-input{width:100%;min-width:140px;border:1px solid #cbd5e1;padding:2px 6px;border-radius:6px;font-size:12px}
-    /* Modo captura: mostrar texto y ocultar el input */
     .obs-cell .obs-display{display:none; white-space:normal; line-height:1.2}
     body.capturando .obs-input{display:none}
     body.capturando .obs-display{display:inline-block}
     .hidden{display:none !important}
-    /* Refuerzo por si se sirve HTML antiguo en caché */
     #file-individual, #file-maestro { display:none !important; }
     label[for="file-individual"], label[for="file-maestro"] { display:none !important; }
   </style>
@@ -35,7 +33,6 @@
     <label for="file-edas">edas.csv</label><input type="file" id="file-edas" accept=".csv"/>
     <label for="file-febriles">febriles.csv</label><input type="file" id="file-febriles" accept=".csv"/>
 
-    <!-- Ocultos porque ya no se usan manualmente -->
     <div class="hidden">
       <label for="file-individual">individual.csv</label>
       <input type="file" id="file-individual" accept=".csv"/>
@@ -159,6 +156,7 @@
   </section>
 </div>
 
+<!-- NOTA: script inline; marcamos el listener como async para usar await -->
 <script>
 /* ================== API endpoints ================== */
 var api = {
@@ -187,11 +185,11 @@ async function maestroExisteEnServidor(){
 
 async function subirMaestroDesdeURL(){
    try{
-    const url = MAESTRO_URL + '?v=' + Date.now(); // evita copiar una respuesta cacheada 404
+    const url = MAESTRO_URL + '?v=' + Date.now();
     const resp = await fetch(url, { cache: 'no-store' });
     if(!resp.ok){
       console.warn('No se halló eess_maestro.csv en', MAESTRO_URL, 'status=', resp.status);
-      return false; // no rompas el flujo
+      return false;
     }
     const text = await resp.text();
     const blob = new Blob([text], { type: 'text/csv' });
@@ -402,6 +400,7 @@ function renderTabla(data){
   if(hideZeros) filas=filas.filter(function(f){return sumRow(f)>0});
 
   var tb=document.querySelector('#tabla-resumen tbody');
+  if(!tb){ console.error('Falta #tabla-resumen tbody'); return; }
 
   if(!groupRis){
     tb.innerHTML=filas.map(function(f){
@@ -492,9 +491,9 @@ async function subirYConsolidar(){
     await uploadCsv(document.getElementById('file-edas'),'edas.csv');
     await uploadCsv(document.getElementById('file-febriles'),'febriles.csv');
 
-    await asegurarMaestro();     // <-- asegura maestro
+    await asegurarMaestro();
     await refrescarArchivos();
-    await cargarOpcionesRIS();   // <-- recarga opciones del combo
+    await cargarOpcionesRIS();
 
     const url = api.summary(ano, semana, ris || undefined, includeAll);
     const r = await fetch(url); if(!r.ok) throw new Error(await r.text());
@@ -700,12 +699,12 @@ if (chkEx){
   });
 }
 
-/* Inicial — ahora asegurado al estar el DOM listo */
-window.addEventListener('DOMContentLoaded', function () {
+/* Inicial — AHORA async para permitir await sin errores */
+window.addEventListener('DOMContentLoaded', async function () {
   buildColgroup();
-  await asegurarMaestro();      // <-- primero garantizamos eess_maestro.csv
+  await asegurarMaestro();
   await refrescarArchivos();
-  await cargarOpcionesRIS();    // <-- ahora sí cargamos las opciones
+  await cargarOpcionesRIS();
   actualizarEncabezadoSE();
 });
 </script>
