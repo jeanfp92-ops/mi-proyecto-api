@@ -227,15 +227,20 @@ static int? MaestroGetUbigeo(Dictionary<string, object> r)
 
     return null;
 }
-
 // ========= CACHE DE DATOS (iras/edas/feb/maestro) =========
-static readonly object _cacheLock = new();
+// En top-level no se permiten campos estáticos sueltos. Los metemos en una clase estática.
+static class CacheState
+{
+    public static readonly object Lock = new();
 
-static (List<Dictionary<string,object>> iras,
+    public static (
+        List<Dictionary<string,object>> iras,
         List<Dictionary<string,object>> edas,
         List<Dictionary<string,object>> febs,
         Dictionary<string, Dictionary<string,object>> maestroByCode,
-        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes)? _cache;
+        (DateTime ti,DateTime te,DateTime tf,DateTime tm) mtimes
+    )? Snapshot;
+}
 
 static (List<Dictionary<string,object>> iras,
         List<Dictionary<string,object>> edas,
@@ -254,9 +259,9 @@ static (List<Dictionary<string,object>> iras,
     var mF = File.Exists(pF) ? File.GetLastWriteTimeUtc(pF) : DateTime.MinValue;
     var mM = File.Exists(pM) ? File.GetLastWriteTimeUtc(pM) : DateTime.MinValue;
 
-    lock (_cacheLock)
+    lock (CacheState.Lock)
     {
-        if (_cache is null || _cache.Value.mtimes != (mI,mE,mF,mM))
+        if (CacheState.Snapshot is null || CacheState.Snapshot.Value.mtimes != (mI,mE,mF,mM))
         {
             var iras = ReadCsv(pI);
             var edas = ReadCsv(pE);
@@ -270,16 +275,19 @@ static (List<Dictionary<string,object>> iras,
                 if (!string.IsNullOrEmpty(code)) maestroByCode[code] = r;
             }
 
-            _cache = (iras, edas, febs, maestroByCode, (mI,mE,mF,mM));
+            CacheState.Snapshot = (iras, edas, febs, maestroByCode, (mI,mE,mF,mM));
         }
 
-        return (_cache.Value.iras, _cache.Value.edas, _cache.Value.febs, _cache.Value.maestroByCode);
+        return (CacheState.Snapshot.Value.iras,
+                CacheState.Snapshot.Value.edas,
+                CacheState.Snapshot.Value.febs,
+                CacheState.Snapshot.Value.maestroByCode);
     }
 }
 
 static void InvalidateSnapshot()
 {
-    lock (_cacheLock) { _cache = null; }
+    lock (CacheState.Lock) { CacheState.Snapshot = null; }
 }
 
 // ======= Endpoints básicos =======
