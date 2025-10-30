@@ -699,8 +699,8 @@ if (chkEx){
   });
 }
 
-/* Inicial — AHORA async para permitir await sin errores */
-window.addEventListener('DOMContentLoaded', async function () {
+// ✅ ahora sí puedes usar await dentro
+window.addEventListener('DOMContentLoaded', async () => {
   buildColgroup();
   await asegurarMaestro();
   await refrescarArchivos();
